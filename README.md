@@ -19,8 +19,40 @@ Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_do
 and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
 be found at [https://hexdocs.pm/nrepl](https://hexdocs.pm/nrepl).
 
+## Usage
 
-#### License
+Start an iex session with the environment variables:
+
+- NREPL_HOST (defaults to "127.0.0.1")
+- NREPL_PORT
+
+```bash
+NREPL_PORT=33685 iex -S mix
+```
+
+```elixir
+Interactive Elixir (1.12.3) - press Ctrl+C to exit (type h() ENTER for help)
+iex(1)>
+14:48:49.195 [debug] nREPL session alive: ec10b34c-b385-4084-806a-1f9dd6dbfc83
+pid = :poolboy.checkout(:nrepl)
+#PID<0.239.0>
+iex(2)> pid |> NRepl.Connection.send_msg(:eval, %{code: ~s<(+ 1 2)>}) |> Stream.map(&IO.inspect/1) |> Stream.run()
+%{
+  "id" => "1b4333b5-fd0d-43e4-b9a5-8daf4ab56856",
+  "ns" => "user",
+  "session" => "e93c44c3-6fc4-4d62-83cc-6fa82d9a9852",
+  "value" => "3"
+}
+%{
+  "id" => "1b4333b5-fd0d-43e4-b9a5-8daf4ab56856",
+  "session" => "e93c44c3-6fc4-4d62-83cc-6fa82d9a9852",
+  "status" => ["done"]
+}
+:ok
+iex(3)>
+```
+
+## License
 
 Copyright 2019 Ben Damman
 

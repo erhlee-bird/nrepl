@@ -1,53 +1,142 @@
 defmodule NRepl.Connection do
+  alias NRepl.Message
+  require Logger
   use Connection
-  alias NRepl.Bencode
 
-  @default_url "nrepl://127.0.0.1:" <> File.read!(".nrepl-port")
-  @initial_state %{socket: nil, reply_to: nil}
+  # Public API.
 
-  defp nrepl_server_config do
-    [host, port] =
-      ~r/nrepl:\/\/(?<host>.*):(?<port>.*)/i
-      |> Regex.named_captures(System.get_env("NREPL_URL", @default_url))
-      |> Map.values()
-
-    {to_charlist(host), String.to_integer(port)}
+  def start_link([host, port]) do
+    Connection.start_link(
+      __MODULE__,
+      %{
+        host: host || "127.0.0.1",
+        port: port,
+        opts: [],
+        session_id: nil,
+        socket: nil
+      }
+    )
   end
 
-  def start_link(_) do
-    Connection.start_link(__MODULE__, @initial_state)
+  def send_msg(pid, op, opts \\ %{}) do
+    Connection.call(pid, {:send_msg, op, opts})
   end
 
-  def init(state) do
-    {:connect, nil, state}
+  def close(pid), do: Connection.call(pid, :close)
+
+  # Utility functions.
+
+  defp bencode_response({_op, nil, _}) do
+    # Use a nil socket as a sentinel to halt the stream.
+    {:halt, nil}
   end
 
-  def state(nrepl_pid) do
-    Connection.call(nrepl_pid, :state)
-  end
+  defp bencode_response({op, socket, buffer}) do
+    # First try and decode results out of the buffer.
+    case Bento.decode_some(buffer) do
+      {:ok, data, new_buffer} ->
+        # If the data contains a `:done` status, we can halt.
+        done? =
+          data
+          |> Map.get("status", %{})
+          |> Enum.any?(fn x -> x == "done" end)
 
-  def close(nrepl_pid) do
-    Connection.call(nrepl_pid, :close)
-  end
+        if done? do
+          {[data], {op, nil, new_buffer}}
+        else
+          {[data], {op, socket, new_buffer}}
+        end
 
-  def send(nrepl_pid, encoded_message) when is_binary(encoded_message) do
-    Connection.call(nrepl_pid, {:send, encoded_message})
-  end
+      # If the buffer is incomplete, read more data off the wire.
+      _ ->
+        case :gen_tcp.recv(socket, 0) do
+          {:ok, bytes} ->
+            {[], {op, socket, concat_bytes(buffer, bytes)}}
 
-  def connect(_info, state) do
-    opts = [:binary]
-    {host, port} = nrepl_server_config()
-
-    case :gen_tcp.connect(host, port, opts) do
-      {:ok, socket} ->
-        {:ok, %{state | socket: socket}}
-
-      {:error, reason} ->
-        IO.puts("Connect error: #{inspect(reason)}")
-        {:backoff, 750, state}
+          {:error, reason} ->
+            Logger.error("nREPL #{inspect(op)} encountered stream read error: #{inspect(reason)}")
+            {:halt, socket}
+        end
     end
   end
 
+  defp bencode_response_stream(op, socket) do
+    Stream.resource(
+      # The stream keeps a socket and a buffer for incomplete parsed data.
+      fn -> {op, socket, []} end,
+      # Repeatedly read and produce Bencode data entries.
+      &bencode_response/1,
+      # Connection state is handled separately from this call.
+      fn socket -> socket end
+    )
+  end
+
+  defp concat_bytes(buffer, bytes) when is_binary(buffer), do: buffer <> bytes
+  defp concat_bytes(buffer, bytes), do: buffer ++ [bytes]
+
+  defp establish_session(socket) do
+    # An nREPL client needs to establish a session and save away the session id for
+    # future interactions with the nREPL server.
+
+    # Per nREPL documentation for building clients, the interaction goes as follows:
+
+    # * Client sends `clone` to create a new session
+    # * Server responds with the session id
+    # * Client sends `describe` to check the server's capabilities and version/
+    #   runtime information.
+    # * Server responds with a map of the relevant data.
+    # * Client starts sending `eval` messages using the session id that it obtained
+    #   earlier.
+    # * Server responds with the appropriate messages (e.g. `value` and `out`).
+    #   Eventually a message with status `done` signals that the eval message has
+    #   been fully processed.
+    :ok = :gen_tcp.send(socket, Message.clone())
+
+    response =
+      bencode_response_stream(:clone, socket)
+      |> Enum.to_list()
+      |> List.first(%{})
+
+    Map.get(response, "new-session", nil)
+  end
+
+  def to_safe_existing_atom(value) do
+    try do
+      String.to_existing_atom(value)
+    rescue
+      ArgumentError -> value
+    end
+  end
+
+  # Connection callbacks.
+
+  @impl true
+  def init(state), do: {:connect, nil, state}
+
+  @impl true
+  def connect(_info, %{host: host, port: port, opts: opts} = state) do
+    conn_timeout = Keyword.get(opts, :timeout, :infinity)
+    tcp_opts = [{:active, false}, :binary]
+
+    {socket, session_id} =
+      case :gen_tcp.connect(to_charlist(host), port, tcp_opts, conn_timeout) do
+        {:ok, socket} ->
+          {socket, establish_session(socket)}
+
+        {:error, reason} ->
+          Logger.error("nREPL connect error: #{inspect(reason)}")
+          {nil, nil}
+      end
+
+    if session_id != nil do
+      Logger.debug("nREPL session alive: #{session_id}")
+      {:ok, %{state | session_id: session_id, socket: socket}}
+    else
+      {:backoff, 1000, state}
+    end
+  end
+
+  @impl true
   def disconnect(info, %{socket: socket} = state) do
     :ok = :gen_tcp.close(socket)
 
@@ -63,47 +152,30 @@ defmodule NRepl.Connection do
         :error_logger.format("Connection error: ~s~n", [reason])
     end
 
-    {:connect, :reconnect, %{state | socket: nil}}
+    {:connect, :reconnect, %{state | session_id: nil, socket: nil}}
+  end
+
+  @impl true
+  def handle_call(_, _, %{socket: nil} = state) do
+    {:reply, {:error, :closed}, state}
   end
 
   def handle_call(:close, from, state) do
     {:disconnect, {:close, from}, state}
   end
 
-  def handle_call({:send, encoded_msg}, {from, _ref}, %{socket: socket} = state) do
-    case :gen_tcp.send(socket, encoded_msg) do
-      :ok ->
-        {:reply, :ok, %{state | reply_to: from}}
+  def handle_call({:send_msg, op, opts}, _, %{session_id: session_id, socket: socket} = state) do
+    # Dynamically call the corresponding op message function.
+    encoded_msg =
+      apply(
+        :"Elixir.NRepl.Message",
+        to_safe_existing_atom(op),
+        [opts |> Map.put(:session_id, session_id)]
+      )
 
-      {:error, _} = error ->
-        {:disconnect, error, error, state}
-    end
-  end
+    :ok = :gen_tcp.send(socket, encoded_msg)
 
-  def handle_call(:state, _from, state) do
-    {:reply, {:ok, state}, state}
-  end
-
-  def handle_call({:recv, bytes, timeout}, _, %{socket: socket} = state) do
-    case :gen_tcp.recv(socket, bytes, timeout) do
-      {:ok, _data} ->
-        {:reply, :ok, state}
-
-      {:error, :timeout} = timeout ->
-        {:reply, timeout, state}
-
-      {:error, _} = error ->
-        {:disconnect, error, error, state}
-    end
-  end
-
-  def handle_info({:tcp, _port, data}, state) do
-    Kernel.send(state[:reply_to], Bencode.decode(data))
-    {:noreply, state}
-  end
-
-  def handle_info({:tcp_closed, port}, state) do
-    IO.puts("TCP connection #{inspect(port)} closed by server")
-    {:connect, nil, %{state | socket: nil}}
+    # Return a stream of decoded bencode objects.
+    {:reply, bencode_response_stream(op, socket), state}
   end
 end

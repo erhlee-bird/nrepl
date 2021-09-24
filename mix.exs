@@ -38,7 +38,7 @@ defmodule NRepl.MixProject do
       {:excoveralls, "~> 0.10", only: :test},
       {:poolboy, "~> 1.5"},
       {:connection, "~> 1.0"},
-      {:bento, "~> 0.9"},
+      {:bento, git: "https://github.com/erhlee-bird/bento"},
       {:elixir_uuid, "~> 1.2"}
     ]
   end
