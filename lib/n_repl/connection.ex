@@ -5,24 +5,32 @@ defmodule NRepl.Connection do
 
   # Public API.
 
-  def start_link([host, port]) do
+  def start_link([host, port]), do: start_link([host, port, nil])
+
+  def start_link([host, port, session_id]) do
     Connection.start_link(
       __MODULE__,
       %{
         host: host || "127.0.0.1",
         port: port,
         opts: [],
-        session_id: nil,
+        session_id: session_id,
         socket: nil
       }
     )
   end
 
+  def close(pid), do: Connection.call(pid, :close)
+
+  @spec send_msg(pid(), atom() | String.t(), map()) :: Enum.t()
+
   def send_msg(pid, op, opts \\ %{}) do
     Connection.call(pid, {:send_msg, op, opts})
   end
 
-  def close(pid), do: Connection.call(pid, :close)
+  def set_session_id(pid, session_id) do
+    Connection.call(pid, {:set_session_id, session_id})
+  end
 
   # Utility functions.
 
@@ -114,14 +122,18 @@ defmodule NRepl.Connection do
   def init(state), do: {:connect, nil, state}
 
   @impl true
-  def connect(_info, %{host: host, port: port, opts: opts} = state) do
+  def connect(_info, %{host: host, port: port, opts: opts, session_id: session_id} = state) do
     conn_timeout = Keyword.get(opts, :timeout, :infinity)
     tcp_opts = [{:active, false}, :binary]
 
     {socket, session_id} =
       case :gen_tcp.connect(to_charlist(host), port, tcp_opts, conn_timeout) do
         {:ok, socket} ->
-          {socket, establish_session(socket)}
+          if session_id != nil do
+            {socket, session_id}
+          else
+            {socket, establish_session(socket)}
+          end
 
         {:error, reason} ->
           Logger.error("nREPL connect error: #{inspect(reason)}")
@@ -170,12 +182,20 @@ defmodule NRepl.Connection do
       apply(
         :"Elixir.NRepl.Message",
         to_safe_existing_atom(op),
-        [opts |> Map.put(:session, session_id)]
+        [
+          opts
+          |> Map.put_new_lazy(:session, fn -> session_id end)
+        ]
       )
 
     :ok = :gen_tcp.send(socket, encoded_msg)
 
     # Return a stream of decoded bencode objects.
     {:reply, bencode_response_stream(op, socket), state}
+  end
+
+  def handle_call({:set_session_id, session_id}, _, state) do
+    Logger.debug("nREPL changing session id: #{state.session_id} -> #{session_id}")
+    {:reply, :ok, %{state | session_id: session_id}}
   end
 end

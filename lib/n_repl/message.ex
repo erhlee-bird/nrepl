@@ -51,6 +51,18 @@ defmodule NRepl.Message do
     |> run_middleware()
   end
 
+  def interrupt(opts \\ %{}) do
+    opts
+    |> Map.put(:op, "interrupt")
+    |> run_middleware()
+  end
+
+  def lookup(opts \\ %{}) do
+    opts
+    |> Map.put(:op, "lookup")
+    |> run_middleware()
+  end
+
   def ls_sessions(opts \\ %{}) do
     opts
     |> Map.put(:op, "ls-sessions")
