@@ -38,7 +38,7 @@ defmodule NRepl.Connection do
         # If the data contains a `:done` status, we can halt.
         done? =
           data
-          |> Map.get("status", %{})
+          |> Map.get("status", [])
           |> Enum.any?(fn x -> x == "done" end)
 
         if done? do
@@ -170,7 +170,7 @@ defmodule NRepl.Connection do
       apply(
         :"Elixir.NRepl.Message",
         to_safe_existing_atom(op),
-        [opts |> Map.put(:session_id, session_id)]
+        [opts |> Map.put(:session, session_id)]
       )
 
     :ok = :gen_tcp.send(socket, encoded_msg)
