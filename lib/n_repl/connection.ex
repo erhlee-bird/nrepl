@@ -29,6 +29,8 @@ defmodule NRepl.Connection do
   end
 
   def close(pid), do: Connection.call(pid, :close)
+  def port_get(pid), do: Connection.call(pid, :port_get)
+  def port_set(pid, port), do: Connection.call(pid, {:port_set, port})
 
   @spec send_msg(pid(), atom() | String.t(), map()) :: Enum.t()
 
@@ -157,6 +159,19 @@ defmodule NRepl.Connection do
   end
 
   @impl true
+  def disconnect(info, %{socket: nil} = state) do
+    case info do
+      {:close, from} ->
+        Connection.reply(from, :ok)
+
+      _ ->
+        :ok
+    end
+
+    {:connect, :reconnect, %{state | session_id: nil, socket: nil}}
+  end
+
+  @impl true
   def disconnect(info, %{socket: socket} = state) do
     :ok = :gen_tcp.close(socket)
 
@@ -173,6 +188,15 @@ defmodule NRepl.Connection do
     end
 
     {:connect, :reconnect, %{state | session_id: nil, socket: nil}}
+  end
+
+  def handle_call(:port_get, _, %{port: port} = state) do
+    {:reply, port, state}
+  end
+
+  def handle_call({:port_set, port}, from, state) do
+    # Update the state to a new port and trigger a reconnect.
+    {:disconnect, {:close, from}, %{state | port: port}}
   end
 
   @impl true
