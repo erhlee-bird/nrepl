@@ -5,9 +5,16 @@ defmodule NRepl.Connection do
 
   # Public API.
 
-  def start_link([host, port]), do: start_link([host, port, nil])
+  def start_link(args, options \\ []) do
+    [host, port, session_id] =
+      case args do
+        [host, port] -> [host, port, nil]
+        [_host, _port, _session_id] = ok -> ok
+        # Raise errors for other unexpected args.
+        _ -> raise ArgumentError, message:
+          "#{__MODULE__}.start_link requires at least a `[host, port]` args list."
+      end
 
-  def start_link([host, port, session_id]) do
     Connection.start_link(
       __MODULE__,
       %{
@@ -16,7 +23,8 @@ defmodule NRepl.Connection do
         opts: [],
         session_id: session_id,
         socket: nil
-      }
+      },
+      options
     )
   end
 
